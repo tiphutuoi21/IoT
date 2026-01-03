@@ -76,8 +76,8 @@ def fetch_and_average_data(blynk_url, fetch_duration_seconds=60, sleep_time_seco
     new_raw_co_mgm3 = avg_co_ppm * CO_CONVERSION_FACTOR
     new_raw_c6h6_ugm3 = avg_c6h6_ppb * C6H6_CONVERSION_FACTOR
     
-    print(f"✅ Fetch complete. Avg CO: {avg_co_ppm:.2f} ppm -> {new_raw_co_mgm3:.4f} mg/m^3")
-    print(f"✅ Avg C6H6: {avg_c6h6_ppb:.2f} ppb -> {new_raw_c6h6_ugm3:.4f} ug/m^3")
+    print(f"[OK] Fetch complete. Avg CO: {avg_co_ppm:.2f} ppm -> {new_raw_co_mgm3:.4f} mg/m^3")
+    print(f"[OK] Avg C6H6: {avg_c6h6_ppb:.2f} ppb -> {new_raw_c6h6_ugm3:.4f} ug/m^3")
     
     return new_raw_co_mgm3, new_raw_c6h6_ugm3
 
@@ -122,9 +122,9 @@ def load_and_synthesize_history(current_dt: datetime) -> pd.DataFrame:
     final_history = final_history.tail(HISTORY_POINTS_REQUIRED).reset_index(drop=True)
     
     if len(final_history) < HISTORY_POINTS_REQUIRED:
-        print(f"⚠️ Warning: Found only {len(final_history)} historical points. Missing data for full 48hr display/T-25 point.")
+        print(f"[WARN] Found only {len(final_history)} historical points. Missing data.")
         
-    print(f"✅ Synthesized history has {len(final_history)} points (T-{len(final_history)} to T-1) ready.")
+    print(f"[OK] Synthesized history has {len(final_history)} points (T-{len(final_history)} to T-1) ready.")
     
     return final_history
 
@@ -134,21 +134,34 @@ def run_automation():
     # T = Current time rounded down to the hour
     current_dt = datetime.now().replace(minute=0, second=0, microsecond=0)
     
+    print("\n" + "="*80)
+    print("[DATAPIPE] Starting automation pipeline...")
+    print(f"[DATAPIPE] Current time (T): {current_dt}")
+    print("="*80)
+    
     # --- STEP 1: Fetch and Convert Live Data ---
+    print("\n[STEP 1] Fetching live data from Blynk...")
     try:
         new_raw_co, new_raw_c6h6 = fetch_and_average_data(BLYNK_URL)
+        print("[STEP 1] Live data fetched successfully!")
     except ValueError as e:
-        print(f"❌ Aborting prediction due to data retrieval error: {e}")
+        print(f"[ERROR] Aborting prediction due to data retrieval error: {e}")
         return
     except Exception as e:
-        print(f"❌ Aborting prediction due to unexpected error: {e}")
+        print(f"[ERROR] Aborting prediction due to unexpected error: {e}")
+        import traceback
+        traceback.print_exc()
         return
         
     # 2. Synthesize History (for T-25 to T-1)
+    print("\n[STEP 2] Loading and synthesizing history...")
     try:
         df_history = load_and_synthesize_history(current_dt)
+        print("[STEP 2] History loaded successfully!")
     except Exception as e:
-        print(f"\n❌ FATAL HISTORY ERROR: {e}")
+        print(f"[ERROR] FATAL HISTORY ERROR: {e}")
+        import traceback
+        traceback.print_exc()
         return
     
     # --- DEBUG 1: Display Synthesized Raw Data (Last 48 hours) ---
@@ -161,6 +174,7 @@ def run_automation():
     print("="*80)
     
     # --- 3. Append New Data to History ---
+    print("\n[STEP 3] Appending new data to history...")
     new_data = {
         'Year': current_dt.year, 'Month': current_dt.month, 'Day': current_dt.day, 'Hour': current_dt.hour,
         # Use converted values here:
@@ -172,8 +186,10 @@ def run_automation():
     df_history_clean = df_history[[col for col in df_history.columns if col in columns_for_fe]]
 
     df_combined = pd.concat([df_history_clean, df_new_row], ignore_index=True)
+    print(f"[STEP 3] New data appended. Combined dataset: {len(df_combined)} rows")
     
     # --- 4. Automate Feature Engineering ---
+    print("\n[STEP 4] Engineering features...")
     df = df_combined.copy()
     
     numeric_cols = ['Hour', 'CO(GT)', 'C6H6(GT)']
@@ -212,42 +228,40 @@ def run_automation():
 
     # 5. Extract the final row (the current hour T)
     latest_features = df.tail(1)[FEATURE_COLS].to_dict('records')[0]
-    
-    # --- DEBUG 2: Display Engineered Features (T) ---
-    print("\n--- DEBUG 2: ENGINEERED FEATURES (T) ---")
-    engineered_df = df.tail(1)[FEATURE_COLS].T
-    engineered_df.columns = ['Value (T)']
-    print(engineered_df)
-    print("-" * 40)
+    print(f"[STEP 4] Features generated: {len(FEATURE_COLS)} features")
     
     # Final check for NaNs
+    print("\n[STEP 5] Validating features (checking for NaNs)...")
     if any(pd.isna(v) for v in latest_features.values()):
         nan_features = {k: v for k, v in latest_features.items() if pd.isna(v)}
-        print("\n❌ CRITICAL WARNING: NaNs still detected in features.")
-        print(f"NaN features: {list(nan_features.keys())}")
-        print("\nACTION: Check DEBUG 1 output for gaps in the historical data, or if the current time matches a known data sparse period in clean3.csv.")
+        print(f"[ERROR] NaNs detected in features: {list(nan_features.keys())}")
         return
+    print(f"[STEP 5] All {len(FEATURE_COLS)} features validated successfully!")
         
     # --- 6. Send Prediction Request (only runs if no NaNs) ---
-    
-    print("\n" + "="*50)
-    print("Payload successfully generated.")
-    print("="*50)
+    print("\n[STEP 6] Sending prediction request to server...")
 
     try:
-        print(f"\nSending request to server at {PREDICTION_URL}...")
+        print(f"  URL: {PREDICTION_URL}")
         response = requests.post(PREDICTION_URL, json=latest_features)
         response.raise_for_status()
         
         prediction = response.json()
-        print("\n✅ Prediction Successful:")
-        print(f"Predicted for: {(current_dt + timedelta(hours=1)).strftime('%Y-%m-%d %H:00')}")
-        print(json.dumps(prediction, indent=2))
+        print("[STEP 6] Prediction received successfully!")
+        print(f"\nPREDICTION RESULTS:")
+        print(f"  Time: {(current_dt + timedelta(hours=1)).strftime('%Y-%m-%d %H:00')}")
+        print(f"  CO(GT): {prediction.get('CO(GT)_prediction', 'N/A')}")
+        print(f"  C6H6(GT): {prediction.get('C6H6(GT)_prediction', 'N/A')}")
+        
+        print("\n" + "="*80)
+        print("[DATAPIPE] Automation pipeline completed successfully!")
+        print("="*80)
 
     except requests.exceptions.RequestException as e:
-        print(f"\n❌ ERROR communicating with the server at {PREDICTION_URL}.")
-        print("Please ensure your 'app.py' server is running in a separate terminal.")
-        print(f"Details: {e}")
+        print(f"[ERROR] Failed to communicate with server at {PREDICTION_URL}")
+        print(f"  Details: {e}")
+        print("  Make sure server.py is running!")
+        return
         
 if __name__ == '__main__':
     run_automation()
